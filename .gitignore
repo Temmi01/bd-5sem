@@ -1,0 +1,5 @@
+.env
+alembic/
+**/__pycache__/
+
+*.pdf
