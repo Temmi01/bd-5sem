@@ -38,6 +38,34 @@ load_dotenv(BASE_DIR / ".env")
 
 Base = declarative_base()
 
+WEATHER_COLUMNS = [
+    "id",
+    "country",
+    "location_name",
+    "latitude",
+    "longitude",
+    "last_updated_date",
+    "wind_degree",
+    "wind_kph",
+    "wind_direction",
+    "sunrise",
+    "temperature_celsius",
+    "pressure_mb",
+    "precip_mm",
+    "humidity",
+]
+
+AIR_QUALITY_COLUMNS = [
+    "air_quality_carbon_monoxide",
+    "air_quality_ozone",
+    "air_quality_nitrogen_dioxide",
+    "air_quality_sulphur_dioxide",
+    "air_quality_pm25",
+    "air_quality_pm10",
+    "air_quality_us_epa_index",
+    "air_quality_gb_defra_index",
+]
+
 class WindDirection(str, enum.Enum):
     N = "N"
     NNE = "NNE"
@@ -262,36 +290,8 @@ def prepare_frames(csv_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         lambda value: value if isinstance(value, date) else date(1970, 1, 1)
     )
 
-    weather_cols = [
-        "id",
-        "country",
-        "location_name",
-        "latitude",
-        "longitude",
-        "last_updated_date",
-        "wind_degree",
-        "wind_kph",
-        "wind_direction",
-        "sunrise",
-        "temperature_celsius",
-        "pressure_mb",
-        "precip_mm",
-        "humidity",
-    ]
-
-    air_cols = [
-        "air_quality_carbon_monoxide",
-        "air_quality_ozone",
-        "air_quality_nitrogen_dioxide",
-        "air_quality_sulphur_dioxide",
-        "air_quality_pm25",
-        "air_quality_pm10",
-        "air_quality_us_epa_index",
-        "air_quality_gb_defra_index",
-    ]
-
-    weather_df = df[weather_cols].copy()
-    air_quality_df = df[["id"] + air_cols].copy().rename(columns={"id": "weather_id"})
+    weather_df = df[WEATHER_COLUMNS].copy()
+    air_quality_df = df[["id"] + AIR_QUALITY_COLUMNS].copy().rename(columns={"id": "weather_id"})
     air_quality_df["go_outside"] = (
         (air_quality_df["air_quality_pm25"] <= 35)
         & (air_quality_df["air_quality_pm10"] <= 50)
@@ -329,6 +329,73 @@ def load_data(target: DbTarget, weather_df: pd.DataFrame, air_quality_df: pd.Dat
         )
     finally:
         engine.dispose()
+
+def export_data(target: DbTarget) -> tuple[pd.DataFrame, pd.DataFrame]:
+    engine = create_engine(target.url)
+    try:
+        _ensure_tables_exist(engine)
+        weather_sql = text(
+            """
+            SELECT
+                id,
+                country,
+                location_name,
+                latitude,
+                longitude,
+                last_updated_date,
+                wind_degree,
+                wind_kph,
+                wind_direction,
+                sunrise,
+                temperature_celsius,
+                pressure_mb,
+                precip_mm,
+                humidity
+            FROM weather
+            ORDER BY id
+            """
+        )
+        air_sql = text(
+            """
+            SELECT
+                weather_id,
+                air_quality_carbon_monoxide,
+                air_quality_ozone,
+                air_quality_nitrogen_dioxide,
+                air_quality_sulphur_dioxide,
+                air_quality_pm25,
+                air_quality_pm10,
+                air_quality_us_epa_index,
+                air_quality_gb_defra_index,
+                go_outside
+            FROM air_quality
+            ORDER BY weather_id
+            """
+        )
+
+        weather_df = pd.read_sql(weather_sql, con=engine)
+        air_quality_df = pd.read_sql(air_sql, con=engine)
+
+        weather_df = weather_df[WEATHER_COLUMNS]
+        air_quality_df = air_quality_df[["weather_id"] + AIR_QUALITY_COLUMNS + ["go_outside"]]
+
+        weather_df["last_updated_date"] = pd.to_datetime(weather_df["last_updated_date"], errors="coerce").dt.date
+        weather_df["sunrise"] = pd.to_datetime(weather_df["sunrise"], errors="coerce").dt.time
+        weather_df["sunrise"] = weather_df["sunrise"].apply(
+            lambda value: value if isinstance(value, time) else time(0, 0)
+        )
+        air_quality_df["go_outside"] = air_quality_df["go_outside"].fillna(False).astype(bool)
+        return weather_df, air_quality_df
+    finally:
+        engine.dispose()
+
+def transfer_postgres_to_mysql(postgres_target: DbTarget, mysql_target: DbTarget) -> None:
+    weather_df, air_quality_df = export_data(postgres_target)
+    if weather_df.empty:
+        raise RuntimeError("Postgres table 'weather' is empty.")
+    if air_quality_df.empty:
+        raise RuntimeError("Postgres table 'air_quality' is empty.")
+    load_data(mysql_target, weather_df, air_quality_df)
 
 class WeatherRepository:
     def __init__(self, session):
@@ -513,22 +580,10 @@ def _parse_args() -> argparse.Namespace:
     migrate_parser.add_argument("--target", choices=["postgres", "mysql", "both"], default="both")
 
     setup_parser = subparsers.add_parser(
-        "setup", help="Run migrations and load CSV data into selected databases"
+        "setup", help="Setup flow: CSV -> postgres, then transfer postgres -> mysql"
     )
     setup_parser.add_argument("--target", choices=["postgres", "mysql", "both"], default="both")
     setup_parser.add_argument("--csv", default=str(CSV_PATH_DEFAULT))
-
-    date_parser = subparsers.add_parser("query-date", help="Query by country and date")
-    date_parser.add_argument("--target", choices=["postgres", "mysql"], default="postgres")
-    date_parser.add_argument("--country", required=True)
-    date_parser.add_argument("--date", required=True, help="YYYY-MM-DD")
-    date_parser.add_argument("--city")
-    date_parser.add_argument("--go-outside", choices=["yes", "no"])
-
-    city_parser = subparsers.add_parser("query-city", help="Query by country and city")
-    city_parser.add_argument("--target", choices=["postgres", "mysql"], default="postgres")
-    city_parser.add_argument("--country", required=True)
-    city_parser.add_argument("--city", required=True)
 
     console_parser = subparsers.add_parser("console", help="Interactive console")
     console_parser.add_argument("--target", choices=["postgres", "mysql"], default="postgres")
@@ -544,46 +599,33 @@ def main() -> None:
         return
 
     if args.command == "setup":
-        targets = resolve_targets(args.target)
-        weather_df, air_quality_df = prepare_frames(Path(args.csv))
-        migrated_targets, migrate_failures = _run_for_targets(
-            targets, "migrate", run_migrations, raise_on_failure=False
-        )
-        loaded_targets, load_failures = _run_for_targets(
-            migrated_targets,
-            "load",
-            lambda target: load_data(target, weather_df, air_quality_df),
-            raise_on_failure=False,
-        )
+        if args.target == "postgres":
+            postgres_target = resolve_targets("postgres")[0]
+            run_migrations(postgres_target)
+            weather_df, air_quality_df = prepare_frames(Path(args.csv))
+            load_data(postgres_target, weather_df, air_quality_df)
+            return
 
-        all_failures = migrate_failures + load_failures
-        if all_failures:
-            details = "\n".join(all_failures)
-            raise RuntimeError(f"setup finished with errors:\n{details}")
-        return
+        if args.target == "mysql":
+            postgres_target = resolve_targets("postgres")[0]
+            mysql_target = resolve_targets("mysql")[0]
+            run_migrations(mysql_target)
+            transfer_postgres_to_mysql(postgres_target, mysql_target)
+            return
 
-    if args.command == "query-date":
-        target = resolve_targets(args.target)[0]
-        go_outside = None
-        if args.go_outside == "yes":
-            go_outside = True
-        elif args.go_outside == "no":
-            go_outside = False
-        rows = query_by_date(target, args.country, args.date, city=args.city, go_outside=go_outside)
-        if not rows:
-            print("No results.")
-        for row in rows:
-            print(row)
-        return
+        if args.target == "both":
+            postgres_target = resolve_targets("postgres")[0]
+            mysql_target = resolve_targets("mysql")[0]
 
-    if args.command == "query-city":
-        target = resolve_targets(args.target)[0]
-        rows = query_by_city(target, args.country, args.city)
-        if not rows:
-            print("No results.")
-        for row in rows:
-            print(row)
-        return
+            run_migrations(postgres_target)
+            weather_df, air_quality_df = prepare_frames(Path(args.csv))
+            load_data(postgres_target, weather_df, air_quality_df)
+
+            run_migrations(mysql_target)
+            transfer_postgres_to_mysql(postgres_target, mysql_target)
+            return
+
+        raise RuntimeError(f"Unsupported setup target: {args.target}")
 
     if args.command == "console":
         target = resolve_targets(args.target)[0]
