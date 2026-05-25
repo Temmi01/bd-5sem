@@ -1,10 +1,9 @@
 
-use("lab4_shop");
+use("lab4");
 db.dropDatabase();
 
 
 // створення товарів
-
 db.items.insertMany([
   {
     _id: "item_phone_iphone13",
@@ -128,21 +127,18 @@ print("Кількість категорій: " + db.items.distinct("category").
 db.items.distinct("producer");
 
 // 6a) товари за категорією та ціною
-
 db.items.find({
   $and: [{ category: "Phone" }, { price: { $gte: 30000, $lte: 37000 } }],
 })
 ;
 
 // 6b) модель одна чи інша
-
 db.items.find({
   $or: [{ model: "iPhone 13" }, { model: "LG OLED C2" }],
 })
 ;
 
 // 6c) виробники з переліку
-
 db.items.find({
   producer: { $in: ["Apple", "Sony"] },
 });

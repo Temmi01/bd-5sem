@@ -50,6 +50,5 @@
 ```bash
 python lab3.py migrate --target both
 python lab3.py setup --target both
-python lab3.py query-date --target postgres --country Afghanistan --date 2024-05-16
 python lab3.py console --target postgres
 ```
